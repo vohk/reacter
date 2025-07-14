@@ -28,7 +28,7 @@ A Discord bot that automatically removes blacklisted emoji reactions and applies
 
 ## Prerequisites
 
-- **Python 3.8+**
+- **Python 3.13+**
 - **uv** package manager ([install here](https://docs.astral.sh/uv/getting-started/installation/))
 - **Discord Bot Token** with the following:
   - **Bot Permissions**: View Channels, Moderate Members, Send Messages, Send Messages in Threads, Manage Messages, Manage Threads, Read Message History, Use External Emoji
