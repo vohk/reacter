@@ -9,7 +9,6 @@ A Discord bot that automatically removes blacklisted emoji reactions and applies
 - **Support for both Unicode and custom emojis**
 - **Persistent blacklist storage** (JSON file)
 - **Optional DM notifications** to timed-out users
-- **Comprehensive admin commands** for blacklist management
 
 ## Commands
 
@@ -40,7 +39,7 @@ A Discord bot that automatically removes blacklisted emoji reactions and applies
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd discord-emoji-blacklist-bot
+   cd reacter
    ```
 
 2. **Install dependencies**
@@ -64,12 +63,13 @@ A Discord bot that automatically removes blacklisted emoji reactions and applies
 
 4. **Configure Discord Bot**
    - Go to [Discord Developer Portal](https://discord.com/developers/applications)
+   - Create a new app
    - Enable **Server Members Intent** and **Message Content Intent**
    - Invite bot with required  permissions
 
 5. **Run the bot**
    ```bash
-   uv run bot.py
+   uv run main.py
    ```
 
 ## Configuration
