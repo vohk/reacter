@@ -16,7 +16,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('BlacklistBot')
+logger = logging.getLogger('Reacter')
 
 load_dotenv()
 
@@ -131,7 +131,7 @@ class EmojiBlacklist:
             displays.append(f"<:{emoji_name}:{emoji_id}>")
         return displays
 
-class BlacklistBot(commands.Bot):
+class Reacter(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.reactions = True
@@ -204,7 +204,7 @@ class BlacklistBot(commands.Bot):
             except discord.HTTPException as e:
                 logger.error(f"Failed to send log message: {e}")
 
-bot = BlacklistBot()
+bot = Reacter()
 
 def parse_emoji(emoji_str: str) -> Optional[Union[str, int]]:
     """Parse an emoji string and return either the Unicode emoji or custom emoji ID."""
