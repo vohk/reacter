@@ -275,6 +275,41 @@ async def on_ready():
         logger.info(f'Blacklisted emojis: {", ".join(all_emojis[:10])}{"..." if len(all_emojis) > 10 else ""}')
 
 @bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Handle bot joining a new guild - create default configuration."""
+    try:
+        # Create default configuration for the new guild
+        guild_config = await bot.guild_config_manager.create_default_config(guild.id)
+        logger.info(f"Bot joined guild '{guild.name}' (ID: {guild.id}). Created default configuration.")
+        
+        # Log guild information for monitoring
+        logger.info(f"Guild '{guild.name}' has {guild.member_count} members")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize configuration for new guild '{guild.name}' (ID: {guild.id}): {e}")
+        # Don't raise the exception - bot should continue working even if config creation fails
+
+@bot.event
+async def on_guild_remove(guild: discord.Guild):
+    """Handle bot leaving a guild - optionally clean up data."""
+    try:
+        logger.info(f"Bot left guild '{guild.name}' (ID: {guild.id})")
+        
+        # Optional: Clean up guild data
+        # For now, we'll keep the data in case the bot rejoins the guild
+        # This can be configured as a setting in the future
+        
+        # Clear any cached configuration for this guild
+        if hasattr(bot.guild_config_manager, '_config_cache'):
+            bot.guild_config_manager._config_cache.pop(guild.id, None)
+        
+        logger.info(f"Cleaned up cached data for guild '{guild.name}' (ID: {guild.id})")
+        
+    except Exception as e:
+        logger.error(f"Error during guild cleanup for '{guild.name}' (ID: {guild.id}): {e}")
+        # Don't raise the exception - this is cleanup and shouldn't affect bot operation
+
+@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     logger.info(f"Reaction detected: {payload.emoji} by user {payload.user_id}")
 
@@ -296,7 +331,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     logger.info(f"Processing reaction in guild: {guild.name}")
 
-    # Get guild configuration
+    # Get guild configuration (this will create default config if none exists)
     try:
         guild_config = await bot.guild_config_manager.get_guild_config(guild.id)
     except Exception as e:
