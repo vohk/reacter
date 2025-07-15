@@ -629,6 +629,319 @@ async def check_bot_permissions(ctx):
 
     await ctx.send(embed=embed)
 
+# Guild settings management commands
+@bot.command(name='settings', aliases=['config', 'guild_settings'])
+@commands.has_permissions(administrator=True)
+async def show_guild_settings(ctx: commands.Context):
+    """Show current guild configuration settings."""
+    try:
+        guild_config = await bot.guild_config_manager.get_guild_config(ctx.guild.id)
+        
+        embed = discord.Embed(
+            title=f"Guild Settings - {ctx.guild.name}",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
+        
+        # Default values for comparison
+        default_config = {
+            'log_channel_id': None,
+            'timeout_duration': 300,
+            'dm_on_timeout': False
+        }
+        
+        # Log Channel
+        if guild_config.log_channel_id:
+            log_channel = ctx.guild.get_channel(guild_config.log_channel_id)
+            if log_channel:
+                log_value = f"{log_channel.mention}"
+                is_custom = guild_config.log_channel_id != default_config['log_channel_id']
+            else:
+                log_value = f"Channel not found (ID: {guild_config.log_channel_id})"
+                is_custom = True
+        else:
+            log_value = "Not set"
+            is_custom = guild_config.log_channel_id != default_config['log_channel_id']
+        
+        embed.add_field(
+            name="🔗 Log Channel",
+            value=f"{log_value} {'*(custom)*' if is_custom else '*(default)*'}",
+            inline=False
+        )
+        
+        # Timeout Duration
+        timeout_minutes = guild_config.timeout_duration // 60
+        timeout_seconds = guild_config.timeout_duration % 60
+        if timeout_minutes > 0:
+            timeout_display = f"{timeout_minutes}m {timeout_seconds}s" if timeout_seconds > 0 else f"{timeout_minutes}m"
+        else:
+            timeout_display = f"{timeout_seconds}s"
+        
+        is_timeout_custom = guild_config.timeout_duration != default_config['timeout_duration']
+        embed.add_field(
+            name="⏱️ Timeout Duration",
+            value=f"{timeout_display} ({guild_config.timeout_duration}s) {'*(custom)*' if is_timeout_custom else '*(default)*'}",
+            inline=True
+        )
+        
+        # DM on Timeout
+        is_dm_custom = guild_config.dm_on_timeout != default_config['dm_on_timeout']
+        embed.add_field(
+            name="📨 DM on Timeout",
+            value=f"{'Enabled' if guild_config.dm_on_timeout else 'Disabled'} {'*(custom)*' if is_dm_custom else '*(default)*'}",
+            inline=True
+        )
+        
+        # Configuration timestamps
+        if guild_config.created_at:
+            embed.add_field(
+                name="📅 Created",
+                value=f"<t:{int(guild_config.created_at.timestamp())}:R>",
+                inline=True
+            )
+        
+        if guild_config.updated_at and guild_config.updated_at != guild_config.created_at:
+            embed.add_field(
+                name="🔄 Last Updated",
+                value=f"<t:{int(guild_config.updated_at.timestamp())}:R>",
+                inline=True
+            )
+        
+        embed.set_footer(text="Use !set_timeout, !set_log_channel, or !set_dm_timeout to modify settings")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Failed to show guild settings for {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to retrieve guild settings. Please try again.")
+
+@bot.command(name='set_timeout', aliases=['timeout_duration'])
+@commands.has_permissions(administrator=True)
+async def set_timeout_duration(ctx: commands.Context, duration: str):
+    """
+    Set the timeout duration for emoji violations.
+    
+    Usage: !set_timeout <duration>
+    Examples: !set_timeout 5m, !set_timeout 300s, !set_timeout 1h30m
+    """
+    try:
+        # Parse duration string
+        timeout_seconds = parse_duration(duration)
+        
+        if timeout_seconds < 0:
+            await ctx.send("❌ Timeout duration cannot be negative.")
+            return
+        
+        if timeout_seconds > 2419200:  # 28 days max
+            await ctx.send("❌ Timeout duration cannot exceed 28 days (2,419,200 seconds).")
+            return
+        
+        # Update guild configuration
+        await bot.guild_config_manager.update_guild_config(
+            ctx.guild.id,
+            timeout_duration=timeout_seconds
+        )
+        
+        # Format duration for display
+        if timeout_seconds == 0:
+            duration_display = "0 seconds (no timeout)"
+        else:
+            minutes = timeout_seconds // 60
+            seconds = timeout_seconds % 60
+            if minutes > 0:
+                duration_display = f"{minutes}m {seconds}s" if seconds > 0 else f"{minutes}m"
+            else:
+                duration_display = f"{seconds}s"
+        
+        embed = discord.Embed(
+            title="✅ Timeout Duration Updated",
+            description=f"Timeout duration set to **{duration_display}** ({timeout_seconds} seconds)",
+            color=discord.Color.green()
+        )
+        
+        await ctx.send(embed=embed)
+        logger.info(f"{ctx.author} updated timeout duration to {timeout_seconds}s in {ctx.guild.name}")
+        
+    except ValueError as e:
+        await ctx.send(f"❌ Invalid duration format: {e}")
+    except Exception as e:
+        logger.error(f"Failed to set timeout duration in {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to update timeout duration. Please try again.")
+
+@bot.command(name='set_log_channel', aliases=['log_channel'])
+@commands.has_permissions(administrator=True)
+async def set_log_channel(ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+    """
+    Set the log channel for bot actions.
+    
+    Usage: !set_log_channel [#channel]
+    Use without a channel to disable logging.
+    """
+    try:
+        channel_id = channel.id if channel else None
+        
+        # Update guild configuration
+        await bot.guild_config_manager.update_guild_config(
+            ctx.guild.id,
+            log_channel_id=channel_id
+        )
+        
+        if channel:
+            embed = discord.Embed(
+                title="✅ Log Channel Updated",
+                description=f"Log channel set to {channel.mention}",
+                color=discord.Color.green()
+            )
+            logger.info(f"{ctx.author} set log channel to {channel.name} in {ctx.guild.name}")
+        else:
+            embed = discord.Embed(
+                title="✅ Log Channel Disabled",
+                description="Bot actions will no longer be logged",
+                color=discord.Color.orange()
+            )
+            logger.info(f"{ctx.author} disabled log channel in {ctx.guild.name}")
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Failed to set log channel in {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to update log channel. Please try again.")
+
+@bot.command(name='set_dm_timeout', aliases=['dm_timeout'])
+@commands.has_permissions(administrator=True)
+async def set_dm_timeout(ctx: commands.Context, enabled: str):
+    """
+    Enable or disable DM notifications when users are timed out.
+    
+    Usage: !set_dm_timeout <true/false|yes/no|on/off|enable/disable>
+    """
+    try:
+        # Parse boolean input
+        enabled_lower = enabled.lower()
+        if enabled_lower in ['true', 'yes', 'on', 'enable', '1']:
+            dm_enabled = True
+        elif enabled_lower in ['false', 'no', 'off', 'disable', '0']:
+            dm_enabled = False
+        else:
+            await ctx.send("❌ Invalid value. Use: true/false, yes/no, on/off, or enable/disable")
+            return
+        
+        # Update guild configuration
+        await bot.guild_config_manager.update_guild_config(
+            ctx.guild.id,
+            dm_on_timeout=dm_enabled
+        )
+        
+        embed = discord.Embed(
+            title="✅ DM Timeout Setting Updated",
+            description=f"DM notifications on timeout: **{'Enabled' if dm_enabled else 'Disabled'}**",
+            color=discord.Color.green()
+        )
+        
+        await ctx.send(embed=embed)
+        logger.info(f"{ctx.author} set DM timeout to {dm_enabled} in {ctx.guild.name}")
+        
+    except Exception as e:
+        logger.error(f"Failed to set DM timeout setting in {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to update DM timeout setting. Please try again.")
+
+@bot.command(name='reset_settings', aliases=['reset_config'])
+@commands.has_permissions(administrator=True)
+async def reset_guild_settings(ctx: commands.Context):
+    """Reset all guild settings to default values (requires confirmation)."""
+    embed = discord.Embed(
+        title="⚠️ Reset Guild Settings",
+        description="Are you sure you want to reset ALL guild settings to default values?\n\n"
+                   "This will reset:\n"
+                   "• Log channel (disabled)\n"
+                   "• Timeout duration (5 minutes)\n"
+                   "• DM on timeout (disabled)\n\n"
+                   "Type `yes` to confirm or `no` to cancel.",
+        color=discord.Color.orange()
+    )
+    
+    await ctx.send(embed=embed)
+    
+    def check(m):
+        return (m.author == ctx.author and 
+                m.channel == ctx.channel and 
+                m.content.lower() in ['yes', 'no'])
+    
+    try:
+        response = await bot.wait_for('message', check=check, timeout=30.0)
+        
+        if response.content.lower() == 'yes':
+            # Reset to default values
+            await bot.guild_config_manager.update_guild_config(
+                ctx.guild.id,
+                log_channel_id=None,
+                timeout_duration=300,
+                dm_on_timeout=False
+            )
+            
+            embed = discord.Embed(
+                title="✅ Settings Reset",
+                description="All guild settings have been reset to default values.",
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed)
+            logger.info(f"{ctx.author} reset guild settings in {ctx.guild.name}")
+        else:
+            embed = discord.Embed(
+                title="❌ Reset Cancelled",
+                description="Guild settings were not changed.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            
+    except asyncio.TimeoutError:
+        embed = discord.Embed(
+            title="❌ Reset Cancelled",
+            description="No response received within 30 seconds. Settings were not changed.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+
+def parse_duration(duration_str: str) -> int:
+    """
+    Parse a duration string into seconds.
+    
+    Supports formats like: 5m, 300s, 1h30m, 2h, 1d, etc.
+    
+    Args:
+        duration_str: Duration string to parse
+        
+    Returns:
+        Duration in seconds
+        
+    Raises:
+        ValueError: If the duration format is invalid
+    """
+    duration_str = duration_str.lower().strip()
+    
+    # Handle pure numbers (assume seconds)
+    if duration_str.isdigit():
+        return int(duration_str)
+    
+    # Parse complex duration strings
+    import re
+    
+    # Pattern to match number + unit combinations
+    pattern = r'(\d+)([smhd])'
+    matches = re.findall(pattern, duration_str)
+    
+    if not matches:
+        raise ValueError("Invalid duration format. Use formats like: 5m, 300s, 1h30m, 2d")
+    
+    total_seconds = 0
+    units = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+    
+    for value, unit in matches:
+        if unit not in units:
+            raise ValueError(f"Invalid time unit: {unit}. Use s, m, h, or d")
+        total_seconds += int(value) * units[unit]
+    
+    return total_seconds
+
 # Error handlers
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
