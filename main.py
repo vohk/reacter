@@ -418,149 +418,212 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 @bot.command(name='blacklist')
 @commands.has_permissions(moderate_members=True)
 async def blacklist_command(ctx: commands.Context):
-    """Show current blacklisted emojis."""
-    all_emojis = bot.emoji_blacklist.get_all_display()
+    """Show current blacklisted emojis for this guild."""
+    try:
+        all_emojis = await bot.guild_blacklist_manager.get_blacklist_display(ctx.guild.id)
 
-    if not all_emojis:
-        await ctx.send("No emojis are currently blacklisted.")
-        return
+        if not all_emojis:
+            await ctx.send("No emojis are currently blacklisted in this server.")
+            return
 
-    # Split into chunks if too many emojis
-    chunks = []
-    current_chunk = []
-    current_length = 0
+        # Split into chunks if too many emojis
+        chunks = []
+        current_chunk = []
+        current_length = 0
 
-    for emoji in all_emojis:
-        emoji_length = len(emoji) + 2  # +2 for comma and space
-        if current_length + emoji_length > 1024:  # Discord embed field limit
+        for emoji in all_emojis:
+            emoji_length = len(emoji) + 2  # +2 for comma and space
+            if current_length + emoji_length > 1024:  # Discord embed field limit
+                chunks.append(", ".join(current_chunk))
+                current_chunk = [emoji]
+                current_length = emoji_length
+            else:
+                current_chunk.append(emoji)
+                current_length += emoji_length
+
+        if current_chunk:
             chunks.append(", ".join(current_chunk))
-            current_chunk = [emoji]
-            current_length = emoji_length
-        else:
-            current_chunk.append(emoji)
-            current_length += emoji_length
 
-    if current_chunk:
-        chunks.append(", ".join(current_chunk))
+        embed = discord.Embed(
+            title=f"Blacklisted Emojis - {ctx.guild.name}",
+            color=discord.Color.red()
+        )
 
-    embed = discord.Embed(
-        title="Blacklisted Emojis",
-        color=discord.Color.red()
-    )
+        for i, chunk in enumerate(chunks):
+            field_name = "Emojis" if i == 0 else f"Emojis (cont. {i})"
+            embed.add_field(name=field_name, value=chunk, inline=False)
 
-    for i, chunk in enumerate(chunks):
-        field_name = "Emojis" if i == 0 else f"Emojis (cont. {i})"
-        embed.add_field(name=field_name, value=chunk, inline=False)
-
-    embed.set_footer(text=f"Total: {len(all_emojis)} emojis")
-    await ctx.send(embed=embed)
+        embed.set_footer(text=f"Total: {len(all_emojis)} emojis")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Failed to show blacklist for guild {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to retrieve blacklist. Please try again.")
 
 @bot.command(name='add_blacklist', aliases=['blacklist_add'])
 @commands.has_permissions(moderate_members=True)
 async def add_blacklist(ctx: commands.Context, *, emoji_input: str):
-    """Add an emoji to the blacklist. Supports Unicode and custom emojis."""
-    # Try to parse as custom emoji
-    parsed = parse_emoji(emoji_input.strip())
+    """Add an emoji to this guild's blacklist. Supports Unicode and custom emojis."""
+    try:
+        # Try to parse as custom emoji
+        parsed = parse_emoji(emoji_input.strip())
 
-    if isinstance(parsed, int):
-        # Custom emoji ID - try to fetch it
-        try:
-            emoji = bot.get_emoji(parsed)
-            if not emoji:
-                # Try to parse from the full custom emoji format
-                custom_match = re.match(r'<a?:(\w+):(\d+)>', emoji_input.strip())
-                if custom_match:
-                    emoji = discord.PartialEmoji(
-                        name=custom_match.group(1),
-                        id=int(custom_match.group(2)),
-                        animated=emoji_input.strip().startswith('<a:')
-                    )
-                else:
-                    await ctx.send("❌ Invalid custom emoji or emoji not found.")
-                    return
-        except (ValueError, AttributeError) as e:
-            await ctx.send("❌ Invalid emoji format.")
-            logger.error(f"Error parsing emoji: {e}")
-            return
-    else:
-        # Unicode emoji
-        emoji = parsed
+        if isinstance(parsed, int):
+            # Custom emoji ID - try to fetch it
+            try:
+                emoji = bot.get_emoji(parsed)
+                if not emoji:
+                    # Try to parse from the full custom emoji format
+                    custom_match = re.match(r'<a?:(\w+):(\d+)>', emoji_input.strip())
+                    if custom_match:
+                        emoji = discord.PartialEmoji(
+                            name=custom_match.group(1),
+                            id=int(custom_match.group(2)),
+                            animated=emoji_input.strip().startswith('<a:')
+                        )
+                    else:
+                        await ctx.send("❌ Invalid custom emoji or emoji not found.")
+                        return
+            except (ValueError, AttributeError) as e:
+                await ctx.send("❌ Invalid emoji format.")
+                logger.error(f"Error parsing emoji: {e}")
+                return
+        else:
+            # Unicode emoji
+            emoji = parsed
 
-    if bot.emoji_blacklist.add_emoji(emoji):
-        bot.save_blacklist()
-        emoji_display = bot.emoji_blacklist.get_emoji_display(emoji)
-        await ctx.send(f"✅ Added {emoji_display} to the blacklist.")
-        logger.info(f"{ctx.author} added {emoji_display} to blacklist in {ctx.guild.name}")
-    else:
-        emoji_display = bot.emoji_blacklist.get_emoji_display(emoji)
-        await ctx.send(f"{emoji_display} is already blacklisted.")
+        # Add to guild-specific blacklist
+        if await bot.guild_blacklist_manager.add_emoji(ctx.guild.id, emoji):
+            emoji_display = get_emoji_display(emoji)
+            await ctx.send(f"✅ Added {emoji_display} to this server's blacklist.")
+            logger.info(f"{ctx.author} added {emoji_display} to blacklist in {ctx.guild.name}")
+        else:
+            emoji_display = get_emoji_display(emoji)
+            await ctx.send(f"{emoji_display} is already blacklisted in this server.")
+            
+    except Exception as e:
+        logger.error(f"Failed to add emoji to blacklist for guild {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to add emoji to blacklist. Please try again.")
 
 @bot.command(name='remove_blacklist', aliases=['blacklist_remove'])
 @commands.has_permissions(moderate_members=True)
 async def remove_blacklist(ctx: commands.Context, *, emoji_input: str):
-    """Remove an emoji from the blacklist."""
-    # Try to parse as custom emoji
-    parsed = parse_emoji(emoji_input.strip())
+    """Remove an emoji from this guild's blacklist."""
+    try:
+        # Try to parse as custom emoji
+        parsed = parse_emoji(emoji_input.strip())
 
-    if isinstance(parsed, int):
-        # Custom emoji ID
-        # Get display name before removing
-        emoji_name = bot.emoji_blacklist.custom_emoji_names.get(parsed, f"ID: {parsed}")
+        if isinstance(parsed, int):
+            # Custom emoji ID - get display name before removing
+            blacklisted_emojis = await bot.guild_blacklist_manager.get_all_blacklisted(ctx.guild.id)
+            emoji_name = None
+            for emoji_data in blacklisted_emojis:
+                if emoji_data['emoji_type'] == 'custom' and emoji_data['emoji_value'] == str(parsed):
+                    emoji_name = emoji_data['emoji_name'] or f"ID: {parsed}"
+                    break
+            
+            if not emoji_name:
+                emoji_name = f"ID: {parsed}"
 
-        if bot.emoji_blacklist.remove_emoji(parsed):
-            bot.save_blacklist()
-            await ctx.send(f"✅ Removed custom emoji ({emoji_name}) from the blacklist.")
-            logger.info(f"{ctx.author} removed custom emoji {emoji_name} from blacklist in {ctx.guild.name}")
+            if await bot.guild_blacklist_manager.remove_emoji(ctx.guild.id, parsed):
+                await ctx.send(f"✅ Removed custom emoji ({emoji_name}) from this server's blacklist.")
+                logger.info(f"{ctx.author} removed custom emoji {emoji_name} from blacklist in {ctx.guild.name}")
+            else:
+                await ctx.send(f"❌ Custom emoji with ID {parsed} is not blacklisted in this server.")
         else:
-            await ctx.send(f"❌ Custom emoji with ID {parsed} is not blacklisted.")
-    else:
-        # Unicode emoji
-        if bot.emoji_blacklist.remove_emoji(parsed):
-            bot.save_blacklist()
-            await ctx.send(f"✅ Removed {parsed} from the blacklist.")
-            logger.info(f"{ctx.author} removed {parsed} from blacklist in {ctx.guild.name}")
-        else:
-            await ctx.send(f"❌ {parsed} is not blacklisted.")
+            # Unicode emoji
+            if await bot.guild_blacklist_manager.remove_emoji(ctx.guild.id, parsed):
+                await ctx.send(f"✅ Removed {parsed} from this server's blacklist.")
+                logger.info(f"{ctx.author} removed {parsed} from blacklist in {ctx.guild.name}")
+            else:
+                await ctx.send(f"❌ {parsed} is not blacklisted in this server.")
+                
+    except Exception as e:
+        logger.error(f"Failed to remove emoji from blacklist for guild {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to remove emoji from blacklist. Please try again.")
 
 @bot.command(name='clear_blacklist')
 @commands.has_permissions(moderate_members=True)
 async def clear_blacklist(ctx: commands.Context):
-    """Clear all blacklisted emojis (requires confirmation)."""
-    await ctx.send("⚠️ Are you sure you want to clear ALL blacklisted emojis? Type `yes` to confirm.")
+    """Clear all blacklisted emojis for this guild (requires confirmation)."""
+    await ctx.send("⚠️ Are you sure you want to clear ALL blacklisted emojis for this server? Type `yes` to confirm.")
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == 'yes'
 
     try:
         await bot.wait_for('message', check=check, timeout=30.0)
-        bot.emoji_blacklist = EmojiBlacklist()
-        bot.save_blacklist()
-        await ctx.send("✅ Cleared all blacklisted emojis.")
+        await bot.guild_blacklist_manager.clear_blacklist(ctx.guild.id)
+        await ctx.send("✅ Cleared all blacklisted emojis for this server.")
         logger.info(f"{ctx.author} cleared emoji blacklist in {ctx.guild.name}")
     except asyncio.TimeoutError:
         await ctx.send("❌ Clear blacklist cancelled (timeout).")
+    except Exception as e:
+        logger.error(f"Failed to clear blacklist for guild {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to clear blacklist. Please try again.")
 
 @bot.command(name='timeout_info')
 @commands.has_permissions(moderate_members=True)
 async def timeout_info(ctx: commands.Context):
-    """Show timeout configuration."""
-    embed = discord.Embed(
-        title="Timeout Configuration",
-        color=discord.Color.blue()
-    )
-    embed.add_field(name="Duration", value=f"{TIMEOUT_DURATION} seconds", inline=True)
-    embed.add_field(name="DM on Timeout", value="Yes" if DM_ON_TIMEOUT else "No", inline=True)
-    embed.add_field(name="Log Channel", value=f"<#{LOG_CHANNEL_ID}>" if LOG_CHANNEL_ID else "Not set", inline=True)
+    """Show timeout configuration for this guild."""
+    try:
+        # Get guild-specific configuration
+        guild_config = await bot.guild_config_manager.get_guild_config(ctx.guild.id)
+        
+        embed = discord.Embed(
+            title=f"Timeout Configuration - {ctx.guild.name}",
+            color=discord.Color.blue()
+        )
+        
+        # Timeout Duration
+        timeout_minutes = guild_config.timeout_duration // 60
+        timeout_seconds = guild_config.timeout_duration % 60
+        if timeout_minutes > 0:
+            timeout_display = f"{timeout_minutes}m {timeout_seconds}s" if timeout_seconds > 0 else f"{timeout_minutes}m"
+        else:
+            timeout_display = f"{timeout_seconds}s"
+        
+        embed.add_field(
+            name="Duration", 
+            value=f"{timeout_display} ({guild_config.timeout_duration} seconds)", 
+            inline=True
+        )
+        
+        # DM on Timeout
+        embed.add_field(
+            name="DM on Timeout", 
+            value="Yes" if guild_config.dm_on_timeout else "No", 
+            inline=True
+        )
+        
+        # Log Channel
+        if guild_config.log_channel_id:
+            log_channel = ctx.guild.get_channel(guild_config.log_channel_id)
+            if log_channel:
+                log_value = log_channel.mention
+            else:
+                log_value = f"Channel not found (ID: {guild_config.log_channel_id})"
+        else:
+            log_value = "Not set"
+        
+        embed.add_field(name="Log Channel", value=log_value, inline=True)
 
-    unicode_count = len(bot.emoji_blacklist.unicode_emojis)
-    custom_count = len(bot.emoji_blacklist.custom_emoji_ids)
-    embed.add_field(
-        name="Blacklisted Emojis",
-        value=f"{unicode_count} Unicode, {custom_count} Custom",
-        inline=True
-    )
+        # Get guild-specific blacklist count
+        blacklisted_emojis = await bot.guild_blacklist_manager.get_all_blacklisted(ctx.guild.id)
+        unicode_count = sum(1 for emoji in blacklisted_emojis if emoji['emoji_type'] == 'unicode')
+        custom_count = sum(1 for emoji in blacklisted_emojis if emoji['emoji_type'] == 'custom')
+        
+        embed.add_field(
+            name="Blacklisted Emojis",
+            value=f"{unicode_count} Unicode, {custom_count} Custom",
+            inline=True
+        )
 
-    await ctx.send(embed=embed)
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Failed to show timeout info for guild {ctx.guild.name}: {e}")
+        await ctx.send("❌ Failed to retrieve timeout configuration. Please try again.")
 
 @bot.command(name='debug_blacklist')
 @commands.has_permissions(moderate_members=True)
