@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from database.manager import DatabaseManager
 from database.guild_config_manager import GuildConfigManager
 from database.guild_blacklist_manager import GuildBlacklistManager
+from database.migration_manager import MigrationManager
 
 # Setup logging
 logging.basicConfig(
@@ -150,16 +151,129 @@ class Reacter(commands.Bot):
         self.db_manager = DatabaseManager()
         self.guild_config_manager = GuildConfigManager(self.db_manager)
         self.guild_blacklist_manager = GuildBlacklistManager(self.db_manager)
+        self.migration_manager = MigrationManager(self.db_manager, BLACKLIST_FILE)
 
         # Legacy blacklist for backward compatibility during migration
         self.emoji_blacklist = EmojiBlacklist()
         self.timeout_cooldowns: Dict[int, Dict[int, datetime]] = defaultdict(dict)
+        
+        # Migration status tracking
+        self.migration_completed = False
+        self.database_initialized = False
+        
+        # Load legacy blacklist for backward compatibility
         self.load_blacklist()
 
     async def setup_hook(self):
-        """Initialize database when bot starts."""
-        await self.db_manager.initialize_database()
-        logger.info("Database initialized successfully")
+        """Initialize database and run migrations when bot starts."""
+        try:
+            # Step 1: Initialize database
+            await self.db_manager.initialize_database()
+            self.database_initialized = True
+            logger.info("Database initialized successfully")
+            
+            # Step 2: Run migration if needed
+            await self._run_startup_migration()
+            
+            # Step 3: Initialize guild configurations for existing guilds
+            await self._initialize_existing_guilds()
+            
+            logger.info("Bot startup sequence completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during bot startup: {e}")
+            # Continue with legacy mode for backward compatibility
+            logger.warning("Continuing with legacy configuration mode")
+
+    async def _run_startup_migration(self):
+        """Run migration from JSON to database if needed."""
+        try:
+            # Check if migration is needed
+            if not os.path.exists(BLACKLIST_FILE):
+                logger.info("No legacy blacklist file found, skipping migration")
+                self.migration_completed = True
+                return
+            
+            # Check if we already have guild configurations (migration already done)
+            existing_configs = await self.db_manager.fetch_all("SELECT COUNT(*) as count FROM guild_configs", ())
+            if existing_configs and existing_configs[0]['count'] > 0:
+                logger.info("Guild configurations already exist, skipping migration")
+                self.migration_completed = True
+                return
+            
+            # Get current guild IDs for migration
+            guild_ids = [guild.id for guild in self.guilds]
+            if not guild_ids:
+                logger.info("No guilds found, skipping migration")
+                self.migration_completed = True
+                return
+            
+            # Use first guild as primary for blacklist migration
+            primary_guild_id = guild_ids[0]
+            
+            logger.info(f"Starting migration for {len(guild_ids)} guilds, primary guild: {primary_guild_id}")
+            
+            # Run migration
+            migration_result = await self.migration_manager.migrate_from_json(
+                guild_ids=guild_ids,
+                default_guild_id=primary_guild_id
+            )
+            
+            if migration_result["success"]:
+                logger.info("Migration completed successfully")
+                logger.info(f"Migration statistics: {migration_result['statistics']}")
+                self.migration_completed = True
+            else:
+                logger.error(f"Migration failed: {migration_result['errors']}")
+                logger.warning("Continuing with legacy mode")
+                # Don't set migration_completed to False here - let it remain False
+                
+        except Exception as e:
+            logger.error(f"Error during migration: {e}")
+            logger.warning("Continuing with legacy mode")
+
+    async def _initialize_existing_guilds(self):
+        """Initialize configurations for existing guilds."""
+        try:
+            for guild in self.guilds:
+                try:
+                    # This will create default config if none exists
+                    await self.guild_config_manager.get_guild_config(guild.id)
+                    logger.debug(f"Initialized configuration for guild {guild.name}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize config for guild {guild.name}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error initializing existing guilds: {e}")
+
+    async def get_effective_config(self, guild_id: int):
+        """
+        Get effective configuration for a guild, with fallback to environment variables.
+        Provides backward compatibility during transition period.
+        """
+        try:
+            if self.database_initialized and self.migration_completed:
+                # Use database configuration
+                return await self.guild_config_manager.get_guild_config(guild_id)
+            else:
+                # Fallback to environment variables for backward compatibility
+                from database.models import GuildConfig
+                return GuildConfig(
+                    guild_id=guild_id,
+                    log_channel_id=LOG_CHANNEL_ID if LOG_CHANNEL_ID > 0 else None,
+                    timeout_duration=TIMEOUT_DURATION,
+                    dm_on_timeout=DM_ON_TIMEOUT
+                )
+        except Exception as e:
+            logger.error(f"Error getting effective config for guild {guild_id}: {e}")
+            # Return environment-based config as ultimate fallback
+            from database.models import GuildConfig
+            return GuildConfig(
+                guild_id=guild_id,
+                log_channel_id=LOG_CHANNEL_ID if LOG_CHANNEL_ID > 0 else None,
+                timeout_duration=TIMEOUT_DURATION,
+                dm_on_timeout=DM_ON_TIMEOUT
+            )
 
     def load_blacklist(self) -> None:
         """Load blacklist from file or use defaults."""
@@ -325,9 +439,12 @@ async def on_ready():
 async def on_guild_join(guild: discord.Guild):
     """Handle bot joining a new guild - create default configuration."""
     try:
-        # Create default configuration for the new guild
-        guild_config = await bot.guild_config_manager.create_default_config(guild.id)
-        logger.info(f"Bot joined guild '{guild.name}' (ID: {guild.id}). Created default configuration.")
+        # Create default configuration for the new guild if database is initialized
+        if bot.database_initialized:
+            guild_config = await bot.guild_config_manager.create_default_config(guild.id)
+            logger.info(f"Bot joined guild '{guild.name}' (ID: {guild.id}). Created default configuration.")
+        else:
+            logger.info(f"Bot joined guild '{guild.name}' (ID: {guild.id}). Database not initialized, using legacy mode.")
         
         # Log guild information for monitoring
         logger.info(f"Guild '{guild.name}' has {guild.member_count} members")
@@ -378,15 +495,15 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     logger.info(f"Processing reaction in guild: {guild.name}")
 
-    # Get guild configuration (this will create default config if none exists)
+    # Get guild configuration with backward compatibility
     try:
-        guild_config = await bot.guild_config_manager.get_guild_config(guild.id)
+        guild_config = await bot.get_effective_config(guild.id)
     except Exception as e:
-        logger.error(f"Failed to get guild config for {guild.name}: {e}")
+        logger.error(f"Failed to get effective config for {guild.name}: {e}")
         # Use default config as fallback to ensure bot continues working
         from database.models import GuildConfig
         guild_config = GuildConfig(guild_id=guild.id)
-        logger.warning(f"Using default config for guild {guild.name} due to database error")
+        logger.warning(f"Using default config for guild {guild.name} due to error")
 
     # Check if emoji is blacklisted using guild-specific blacklist
     try:
@@ -658,8 +775,8 @@ async def clear_blacklist(ctx: commands.Context):
 async def timeout_info(ctx: commands.Context):
     """Show timeout configuration for this guild."""
     try:
-        # Get guild-specific configuration
-        guild_config = await bot.guild_config_manager.get_guild_config(ctx.guild.id)
+        # Get effective configuration with backward compatibility
+        guild_config = await bot.get_effective_config(ctx.guild.id)
         
         embed = discord.Embed(
             title=f"Timeout Configuration - {ctx.guild.name}",
@@ -789,7 +906,7 @@ async def check_bot_permissions(ctx):
 async def show_guild_settings(ctx: commands.Context):
     """Show current guild configuration settings."""
     try:
-        guild_config = await bot.guild_config_manager.get_guild_config(ctx.guild.id)
+        guild_config = await bot.get_effective_config(ctx.guild.id)
         
         embed = discord.Embed(
             title=f"Guild Settings - {ctx.guild.name}",

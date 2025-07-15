@@ -3,7 +3,7 @@ Tests for bot error resilience and graceful degradation.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 import discord
 from database.manager import DatabaseError
 
@@ -30,8 +30,7 @@ class TestBotErrorResilience:
     @pytest.mark.asyncio
     async def test_guild_join_with_database_error(self):
         """Test that guild join events handle database errors gracefully."""
-        from main import Reacter
-        bot = Reacter()
+        from main import bot
         
         # Mock guild
         mock_guild = MagicMock(spec=discord.Guild)
@@ -49,8 +48,7 @@ class TestBotErrorResilience:
     @pytest.mark.asyncio
     async def test_reaction_handling_with_multiple_errors(self):
         """Test reaction handling when multiple components fail."""
-        from main import Reacter
-        bot = Reacter()
+        from main import bot, on_raw_reaction_add
         
         # Mock payload
         mock_payload = MagicMock()
@@ -64,19 +62,25 @@ class TestBotErrorResilience:
         mock_guild.name = "Test Guild"
         bot.get_guild = MagicMock(return_value=mock_guild)
         
-        # Mock both config and blacklist managers to fail
-        with patch.object(bot.guild_config_manager, 'get_guild_config') as mock_config:
-            with patch.object(bot.guild_blacklist_manager, 'is_blacklisted') as mock_blacklist:
-                mock_config.side_effect = DatabaseError("Config error")
-                mock_blacklist.side_effect = DatabaseError("Blacklist error")
-                
-                # Should not raise an exception
-                await bot.on_raw_reaction_add(mock_payload)
+        # Mock bot user using PropertyMock
+        mock_user = MagicMock()
+        mock_user.id = 999
+        with patch.object(type(bot), 'user', new_callable=PropertyMock) as mock_user_prop:
+            mock_user_prop.return_value = mock_user
+            
+            # Mock both config and blacklist managers to fail
+            with patch.object(bot, 'get_effective_config') as mock_config:
+                with patch.object(bot.guild_blacklist_manager, 'is_blacklisted') as mock_blacklist:
+                    mock_config.side_effect = DatabaseError("Config error")
+                    mock_blacklist.side_effect = DatabaseError("Blacklist error")
+                    
+                    # Should not raise an exception
+                    await on_raw_reaction_add(mock_payload)
     
     @pytest.mark.asyncio
     async def test_command_resilience_to_database_errors(self):
         """Test that commands remain functional despite database errors."""
-        from main import blacklist_command, add_blacklist, remove_blacklist
+        from main import bot
         
         # Mock context
         mock_ctx = MagicMock()
@@ -85,24 +89,23 @@ class TestBotErrorResilience:
         mock_ctx.send = AsyncMock()
         
         # Mock bot with failing database operations
-        with patch('main.bot') as mock_bot:
-            mock_bot.guild_blacklist_manager.get_blacklist_display = AsyncMock(
-                side_effect=DatabaseError("Database error")
-            )
-            mock_bot.guild_blacklist_manager.add_emoji = AsyncMock(
-                side_effect=DatabaseError("Database error")
-            )
-            mock_bot.guild_blacklist_manager.remove_emoji = AsyncMock(
-                side_effect=DatabaseError("Database error")
-            )
-            
-            # All commands should handle errors gracefully
-            await blacklist_command(mock_ctx)
-            await add_blacklist(mock_ctx, "😀")
-            await remove_blacklist(mock_ctx, "😀")
-            
-            # Verify error messages were sent
-            assert mock_ctx.send.call_count >= 3
+        with patch.object(bot.guild_blacklist_manager, 'get_blacklist_display') as mock_display:
+            with patch.object(bot.guild_blacklist_manager, 'add_emoji') as mock_add:
+                with patch.object(bot.guild_blacklist_manager, 'remove_emoji') as mock_remove:
+                    mock_display.side_effect = DatabaseError("Database error")
+                    mock_add.side_effect = DatabaseError("Database error")
+                    mock_remove.side_effect = DatabaseError("Database error")
+                    
+                    # Import and call commands directly
+                    from main import blacklist_command, add_blacklist, remove_blacklist
+                    
+                    # All commands should handle errors gracefully
+                    await blacklist_command(mock_ctx)
+                    await add_blacklist(mock_ctx, emoji_input="😀")
+                    await remove_blacklist(mock_ctx, emoji_input="😀")
+                    
+                    # Verify error messages were sent
+                    assert mock_ctx.send.call_count >= 3
     
     @pytest.mark.asyncio
     async def test_logging_channel_error_recovery(self):
