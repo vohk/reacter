@@ -5,7 +5,7 @@ Guild-specific blacklist management system.
 import logging
 from typing import Union, List, Dict, Optional
 import discord
-from .manager import DatabaseManager
+from .manager import DatabaseManager, DatabaseError
 from .models import BlacklistedEmoji
 from datetime import datetime
 
@@ -51,8 +51,19 @@ class GuildBlacklistManager:
             logger.info(f"Added {emoji_type} emoji {emoji_value} to blacklist for guild {guild_id}")
             return True
             
+        except DatabaseError as e:
+            logger.error(f"Database error adding emoji to blacklist for guild {guild_id}: {e}")
+            # Update cache even if database fails to maintain consistency for current session
+            try:
+                emoji_type, emoji_value, emoji_name = self._parse_emoji(emoji)
+                self._update_cache_add(guild_id, emoji_type, emoji_value)
+                logger.warning(f"Added emoji to cache only for guild {guild_id} due to database error")
+                return True
+            except Exception as parse_error:
+                logger.error(f"Failed to parse emoji during fallback: {parse_error}")
+                raise DatabaseError(f"Failed to add emoji to blacklist: {e}")
         except Exception as e:
-            logger.error(f"Failed to add emoji to blacklist for guild {guild_id}: {e}")
+            logger.error(f"Unexpected error adding emoji to blacklist for guild {guild_id}: {e}")
             raise
     
     async def remove_emoji(self, guild_id: int, emoji: Union[str, discord.Emoji, discord.PartialEmoji, int]) -> bool:
@@ -100,8 +111,23 @@ class GuildBlacklistManager:
             logger.info(f"Removed {emoji_type} emoji {emoji_value} from blacklist for guild {guild_id}")
             return True
             
+        except DatabaseError as e:
+            logger.error(f"Database error removing emoji from blacklist for guild {guild_id}: {e}")
+            # Update cache even if database fails to maintain consistency for current session
+            try:
+                if isinstance(emoji, int):
+                    emoji_type = "custom"
+                    emoji_value = str(emoji)
+                else:
+                    emoji_type, emoji_value, _ = self._parse_emoji(emoji)
+                self._update_cache_remove(guild_id, emoji_type, emoji_value)
+                logger.warning(f"Removed emoji from cache only for guild {guild_id} due to database error")
+                return True
+            except Exception as parse_error:
+                logger.error(f"Failed to parse emoji during fallback: {parse_error}")
+                raise DatabaseError(f"Failed to remove emoji from blacklist: {e}")
         except Exception as e:
-            logger.error(f"Failed to remove emoji from blacklist for guild {guild_id}: {e}")
+            logger.error(f"Unexpected error removing emoji from blacklist for guild {guild_id}: {e}")
             raise
     
     async def is_blacklisted(self, guild_id: int, emoji: Union[str, discord.Emoji, discord.PartialEmoji]) -> bool:
@@ -153,8 +179,37 @@ class GuildBlacklistManager:
             rows = await self.db_manager.fetch_all(query, (guild_id,))
             return rows
             
+        except DatabaseError as e:
+            logger.error(f"Database error getting blacklisted emojis for guild {guild_id}: {e}")
+            # Fallback to cache if available
+            if guild_id in self._cache:
+                logger.warning(f"Using cached data for guild {guild_id} blacklist due to database error")
+                cache_data = []
+                guild_cache = self._cache[guild_id]
+                
+                # Convert cache to list format
+                for emoji_value in guild_cache.get("unicode", set()):
+                    cache_data.append({
+                        'emoji_type': 'unicode',
+                        'emoji_value': emoji_value,
+                        'emoji_name': None,
+                        'created_at': None
+                    })
+                
+                for emoji_value in guild_cache.get("custom", set()):
+                    cache_data.append({
+                        'emoji_type': 'custom',
+                        'emoji_value': emoji_value,
+                        'emoji_name': 'unknown',
+                        'created_at': None
+                    })
+                
+                return cache_data
+            else:
+                logger.warning(f"No cached data available for guild {guild_id}")
+                return []
         except Exception as e:
-            logger.error(f"Failed to get blacklisted emojis for guild {guild_id}: {e}")
+            logger.error(f"Unexpected error getting blacklisted emojis for guild {guild_id}: {e}")
             return []
     
     async def clear_blacklist(self, guild_id: int) -> None:
@@ -174,8 +229,15 @@ class GuildBlacklistManager:
             
             logger.info(f"Cleared all blacklisted emojis for guild {guild_id}")
             
+        except DatabaseError as e:
+            logger.error(f"Database error clearing blacklist for guild {guild_id}: {e}")
+            # Clear cache even if database fails to maintain consistency for current session
+            if guild_id in self._cache:
+                del self._cache[guild_id]
+                logger.warning(f"Cleared cache only for guild {guild_id} due to database error")
+            raise DatabaseError(f"Failed to clear blacklist for guild {guild_id}: {e}")
         except Exception as e:
-            logger.error(f"Failed to clear blacklist for guild {guild_id}: {e}")
+            logger.error(f"Unexpected error clearing blacklist for guild {guild_id}: {e}")
             raise
     
     async def get_blacklist_display(self, guild_id: int) -> List[str]:

@@ -251,20 +251,67 @@ def get_emoji_display(emoji: Union[str, discord.Emoji, discord.PartialEmoji]) ->
     return str(emoji)
 
 async def log_guild_action(guild: discord.Guild, guild_config, message: str) -> None:
-    """Send a log message to the guild's designated log channel."""
+    """Send a log message to the guild's designated log channel with comprehensive error handling."""
     if not guild_config.log_channel_id:
+        logger.debug(f"No log channel configured for guild {guild.name}")
         return
 
-    log_channel = guild.get_channel(guild_config.log_channel_id)
-    if log_channel and isinstance(log_channel, discord.TextChannel):
+    try:
+        log_channel = guild.get_channel(guild_config.log_channel_id)
+        
+        if not log_channel:
+            # Try to fetch the channel in case it's not in cache
+            try:
+                log_channel = await guild.fetch_channel(guild_config.log_channel_id)
+            except discord.NotFound:
+                logger.warning(f"Log channel {guild_config.log_channel_id} no longer exists in {guild.name}")
+                # Optionally clear the log channel from config to prevent repeated attempts
+                try:
+                    await bot.guild_config_manager.update_guild_config(guild.id, log_channel_id=None)
+                    logger.info(f"Cleared invalid log channel from config for guild {guild.name}")
+                except Exception as config_error:
+                    logger.error(f"Failed to clear invalid log channel from config: {config_error}")
+                return
+            except discord.Forbidden:
+                logger.warning(f"No permission to access log channel {guild_config.log_channel_id} in {guild.name}")
+                return
+            except discord.HTTPException as e:
+                logger.error(f"HTTP error fetching log channel in {guild.name}: {e}")
+                return
+        
+        if not isinstance(log_channel, discord.TextChannel):
+            logger.warning(f"Log channel {guild_config.log_channel_id} is not a text channel in {guild.name}")
+            return
+        
+        # Check bot permissions in the channel
+        bot_permissions = log_channel.permissions_for(guild.me)
+        if not bot_permissions.send_messages:
+            logger.warning(f"Bot lacks send_messages permission in log channel for {guild.name}")
+            return
+        
+        # Attempt to send the log message
         try:
             await log_channel.send(message)
+            logger.debug(f"Successfully logged action to {guild.name}")
         except discord.Forbidden:
-            logger.warning(f"Cannot send to log channel in {guild.name}")
+            logger.warning(f"Forbidden: Cannot send to log channel in {guild.name} (permissions may have changed)")
         except discord.HTTPException as e:
-            logger.error(f"Failed to send log message: {e}")
-    else:
-        logger.warning(f"Log channel {guild_config.log_channel_id} not found or not accessible in {guild.name}")
+            if e.status == 404:
+                logger.warning(f"Log channel was deleted while attempting to send message in {guild.name}")
+                # Clear the invalid channel from config
+                try:
+                    await bot.guild_config_manager.update_guild_config(guild.id, log_channel_id=None)
+                    logger.info(f"Cleared deleted log channel from config for guild {guild.name}")
+                except Exception as config_error:
+                    logger.error(f"Failed to clear deleted log channel from config: {config_error}")
+            else:
+                logger.error(f"HTTP error sending log message to {guild.name}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error sending log message to {guild.name}: {e}")
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in log_guild_action for {guild.name}: {e}")
+        # Ensure logging errors don't affect bot functionality
 
 @bot.event
 async def on_ready():
@@ -336,13 +383,18 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         guild_config = await bot.guild_config_manager.get_guild_config(guild.id)
     except Exception as e:
         logger.error(f"Failed to get guild config for {guild.name}: {e}")
-        return
+        # Use default config as fallback to ensure bot continues working
+        from database.models import GuildConfig
+        guild_config = GuildConfig(guild_id=guild.id)
+        logger.warning(f"Using default config for guild {guild.name} due to database error")
 
     # Check if emoji is blacklisted using guild-specific blacklist
     try:
         is_blacklisted = await bot.guild_blacklist_manager.is_blacklisted(guild.id, payload.emoji)
     except Exception as e:
         logger.error(f"Failed to check blacklist for guild {guild.name}: {e}")
+        # Continue with assumption that emoji is not blacklisted to avoid false positives
+        logger.warning(f"Assuming emoji is not blacklisted for guild {guild.name} due to database error")
         return
 
     logger.info(f"Emoji {payload.emoji} blacklisted in guild {guild.name}: {is_blacklisted}")
@@ -493,7 +545,11 @@ async def blacklist_command(ctx: commands.Context):
         
     except Exception as e:
         logger.error(f"Failed to show blacklist for guild {ctx.guild.name}: {e}")
-        await ctx.send("❌ Failed to retrieve blacklist. Please try again.")
+        # Provide more specific error messages based on error type
+        if "database" in str(e).lower():
+            await ctx.send("❌ Database error occurred. The bot is still functional but blacklist data may be temporarily unavailable.")
+        else:
+            await ctx.send("❌ Failed to retrieve blacklist. Please try again.")
 
 @bot.command(name='add_blacklist', aliases=['blacklist_add'])
 @commands.has_permissions(moderate_members=True)

@@ -5,7 +5,7 @@ Guild configuration management system.
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
-from database.manager import DatabaseManager
+from database.manager import DatabaseManager, DatabaseError
 from database.models import GuildConfig
 
 logger = logging.getLogger(__name__)
@@ -59,10 +59,25 @@ class GuildConfigManager:
                 # Create default configuration if none exists
                 return await self.create_default_config(guild_id)
                 
+        except DatabaseError as e:
+            logger.error(f"Database error getting guild config for {guild_id}: {e}")
+            # Return cached config if available, otherwise default
+            cached_config = self.get_cached_config(guild_id)
+            if cached_config:
+                logger.info(f"Using cached config for guild {guild_id} due to database error")
+                return cached_config
+            else:
+                logger.warning(f"No cached config available, using default for guild {guild_id}")
+                default_config = GuildConfig(guild_id=guild_id)
+                # Cache the default config to avoid repeated database attempts
+                self._config_cache[guild_id] = default_config
+                return default_config
         except Exception as e:
-            logger.error(f"Failed to get guild config for {guild_id}: {e}")
+            logger.error(f"Unexpected error getting guild config for {guild_id}: {e}")
             # Return default config as fallback
-            return GuildConfig(guild_id=guild_id)
+            default_config = GuildConfig(guild_id=guild_id)
+            self._config_cache[guild_id] = default_config
+            return default_config
     
     async def create_default_config(self, guild_id: int) -> GuildConfig:
         """
@@ -100,10 +115,19 @@ class GuildConfigManager:
             logger.info(f"Created default configuration for guild {guild_id}")
             return config
             
+        except DatabaseError as e:
+            logger.error(f"Database error creating default config for guild {guild_id}: {e}")
+            # Return in-memory default as fallback and cache it
+            default_config = GuildConfig(guild_id=guild_id)
+            self._config_cache[guild_id] = default_config
+            logger.warning(f"Using in-memory default config for guild {guild_id} due to database error")
+            return default_config
         except Exception as e:
-            logger.error(f"Failed to create default config for guild {guild_id}: {e}")
+            logger.error(f"Unexpected error creating default config for guild {guild_id}: {e}")
             # Return in-memory default as fallback
-            return GuildConfig(guild_id=guild_id)
+            default_config = GuildConfig(guild_id=guild_id)
+            self._config_cache[guild_id] = default_config
+            return default_config
     
     async def update_guild_config(self, guild_id: int, **kwargs) -> None:
         """
@@ -149,7 +173,7 @@ class GuildConfigManager:
             
             await self.db_manager.execute_query(query, tuple(params))
             
-            # Update cache
+            # Update cache regardless of database success
             if guild_id in self._config_cache:
                 config = self._config_cache[guild_id]
                 for field, value in kwargs.items():
@@ -159,8 +183,19 @@ class GuildConfigManager:
             
             logger.info(f"Updated configuration for guild {guild_id}: {kwargs}")
             
+        except DatabaseError as e:
+            logger.error(f"Database error updating guild config for {guild_id}: {e}")
+            # Update cache even if database fails to maintain consistency
+            if guild_id in self._config_cache:
+                config = self._config_cache[guild_id]
+                for field, value in kwargs.items():
+                    if hasattr(config, field):
+                        setattr(config, field, value)
+                config.updated_at = datetime.now()
+                logger.warning(f"Updated cached config for guild {guild_id} despite database error")
+            raise DatabaseError(f"Failed to persist configuration update for guild {guild_id}: {e}")
         except Exception as e:
-            logger.error(f"Failed to update guild config for {guild_id}: {e}")
+            logger.error(f"Unexpected error updating guild config for {guild_id}: {e}")
             raise
     
     async def delete_guild_config(self, guild_id: int) -> None:
