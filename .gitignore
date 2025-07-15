@@ -14,3 +14,9 @@ wheels/
 
 # Kiro
 .kiro
+migration_backups
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3

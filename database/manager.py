@@ -6,8 +6,10 @@ import sqlite3
 import aiosqlite
 import asyncio
 import logging
+import time
 from typing import Any, Optional, List, Dict
 from pathlib import Path
+from .logging_manager import monitoring_manager, DatabaseOperation
 
 logger = logging.getLogger(__name__)
 
@@ -79,95 +81,167 @@ class DatabaseManager:
     
     async def execute_query(self, query: str, params: tuple = ()) -> Any:
         """Execute a query that modifies data (INSERT, UPDATE, DELETE)."""
-        max_retries = 3
-        retry_delay = 1.0
+        # Determine operation type and table name for monitoring
+        operation_type = query.strip().split()[0].upper()
+        table_name = self._extract_table_name(query, operation_type)
+        guild_id = self._extract_guild_id(params)
         
-        for attempt in range(max_retries):
-            try:
-                async with aiosqlite.connect(self.db_path) as db:
-                    cursor = await db.execute(query, params)
-                    await db.commit()
-                    return cursor.lastrowid
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                    logger.warning(f"Database locked, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                    continue
-                else:
-                    logger.error(f"Database operational error: {e}")
-                    raise DatabaseError(f"Database operation failed: {e}")
-            except sqlite3.IntegrityError as e:
-                logger.error(f"Database integrity error: {e}")
-                raise DatabaseError(f"Data integrity violation: {e}")
-            except sqlite3.Error as e:
-                logger.error(f"SQLite error: {e}")
-                raise DatabaseError(f"Database error: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error executing query: {query} with params {params}. Error: {e}")
-                raise DatabaseError(f"Unexpected database error: {e}")
+        operation = DatabaseOperation(
+            operation_type=operation_type,
+            table_name=table_name,
+            guild_id=guild_id,
+            query=query,
+            params=params
+        )
         
-        raise DatabaseError("Database operation failed after maximum retries")
+        async with monitoring_manager.monitor_operation(operation):
+            max_retries = 3
+            retry_delay = 1.0
+            
+            for attempt in range(max_retries):
+                try:
+                    start_time = time.time()
+                    async with aiosqlite.connect(self.db_path) as db:
+                        cursor = await db.execute(query, params)
+                        await db.commit()
+                        
+                        # Record rows affected for monitoring
+                        operation.rows_affected = cursor.rowcount
+                        
+                        logger.debug(f"Executed {operation_type} on {table_name} - "
+                                   f"Rows affected: {cursor.rowcount}, "
+                                   f"Time: {time.time() - start_time:.3f}s")
+                        
+                        return cursor.lastrowid
+                        
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        logger.warning(f"Database locked, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        logger.error(f"Database operational error: {e}")
+                        raise DatabaseError(f"Database operation failed: {e}")
+                except sqlite3.IntegrityError as e:
+                    logger.error(f"Database integrity error: {e}")
+                    raise DatabaseError(f"Data integrity violation: {e}")
+                except sqlite3.Error as e:
+                    logger.error(f"SQLite error: {e}")
+                    raise DatabaseError(f"Database error: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error executing query: {query} with params {params}. Error: {e}")
+                    raise DatabaseError(f"Unexpected database error: {e}")
+            
+            raise DatabaseError("Database operation failed after maximum retries")
     
     async def fetch_one(self, query: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
         """Fetch a single row from the database."""
-        max_retries = 3
-        retry_delay = 1.0
+        # Set up monitoring for SELECT operations
+        operation_type = "SELECT"
+        table_name = self._extract_table_name(query, operation_type)
+        guild_id = self._extract_guild_id(params)
         
-        for attempt in range(max_retries):
-            try:
-                async with aiosqlite.connect(self.db_path) as db:
-                    db.row_factory = aiosqlite.Row
-                    cursor = await db.execute(query, params)
-                    row = await cursor.fetchone()
-                    return dict(row) if row else None
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                    logger.warning(f"Database locked during fetch_one, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-                else:
-                    logger.error(f"Database operational error during fetch_one: {e}")
-                    raise DatabaseError(f"Database fetch operation failed: {e}")
-            except sqlite3.Error as e:
-                logger.error(f"SQLite error during fetch_one: {e}")
-                raise DatabaseError(f"Database error: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error during fetch_one: {query} with params {params}. Error: {e}")
-                raise DatabaseError(f"Unexpected database error: {e}")
+        operation = DatabaseOperation(
+            operation_type=operation_type,
+            table_name=table_name,
+            guild_id=guild_id,
+            query=query,
+            params=params
+        )
         
-        raise DatabaseError("Database fetch operation failed after maximum retries")
+        async with monitoring_manager.monitor_operation(operation):
+            max_retries = 3
+            retry_delay = 1.0
+            
+            for attempt in range(max_retries):
+                try:
+                    start_time = time.time()
+                    async with aiosqlite.connect(self.db_path) as db:
+                        db.row_factory = aiosqlite.Row
+                        cursor = await db.execute(query, params)
+                        row = await cursor.fetchone()
+                        
+                        # Record performance metrics
+                        operation.rows_affected = 1 if row else 0
+                        
+                        logger.debug(f"Executed SELECT on {table_name} - "
+                                   f"Found: {1 if row else 0} row, "
+                                   f"Time: {time.time() - start_time:.3f}s")
+                        
+                        return dict(row) if row else None
+                        
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        logger.warning(f"Database locked during fetch_one, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    else:
+                        logger.error(f"Database operational error during fetch_one: {e}")
+                        raise DatabaseError(f"Database fetch operation failed: {e}")
+                except sqlite3.Error as e:
+                    logger.error(f"SQLite error during fetch_one: {e}")
+                    raise DatabaseError(f"Database error: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error during fetch_one: {query} with params {params}. Error: {e}")
+                    raise DatabaseError(f"Unexpected database error: {e}")
+            
+            raise DatabaseError("Database fetch operation failed after maximum retries")
     
     async def fetch_all(self, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         """Fetch all rows from the database."""
-        max_retries = 3
-        retry_delay = 1.0
+        # Set up monitoring for SELECT operations
+        operation_type = "SELECT"
+        table_name = self._extract_table_name(query, operation_type)
+        guild_id = self._extract_guild_id(params)
         
-        for attempt in range(max_retries):
-            try:
-                async with aiosqlite.connect(self.db_path) as db:
-                    db.row_factory = aiosqlite.Row
-                    cursor = await db.execute(query, params)
-                    rows = await cursor.fetchall()
-                    return [dict(row) for row in rows]
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                    logger.warning(f"Database locked during fetch_all, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-                else:
-                    logger.error(f"Database operational error during fetch_all: {e}")
-                    raise DatabaseError(f"Database fetch operation failed: {e}")
-            except sqlite3.Error as e:
-                logger.error(f"SQLite error during fetch_all: {e}")
-                raise DatabaseError(f"Database error: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error during fetch_all: {query} with params {params}. Error: {e}")
-                raise DatabaseError(f"Unexpected database error: {e}")
+        operation = DatabaseOperation(
+            operation_type=operation_type,
+            table_name=table_name,
+            guild_id=guild_id,
+            query=query,
+            params=params
+        )
         
-        raise DatabaseError("Database fetch operation failed after maximum retries")
+        async with monitoring_manager.monitor_operation(operation):
+            max_retries = 3
+            retry_delay = 1.0
+            
+            for attempt in range(max_retries):
+                try:
+                    start_time = time.time()
+                    async with aiosqlite.connect(self.db_path) as db:
+                        db.row_factory = aiosqlite.Row
+                        cursor = await db.execute(query, params)
+                        rows = await cursor.fetchall()
+                        
+                        # Record performance metrics
+                        operation.rows_affected = len(rows)
+                        
+                        logger.debug(f"Executed SELECT on {table_name} - "
+                                   f"Found: {len(rows)} rows, "
+                                   f"Time: {time.time() - start_time:.3f}s")
+                        
+                        return [dict(row) for row in rows]
+                        
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        logger.warning(f"Database locked during fetch_all, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    else:
+                        logger.error(f"Database operational error during fetch_all: {e}")
+                        raise DatabaseError(f"Database fetch operation failed: {e}")
+                except sqlite3.Error as e:
+                    logger.error(f"SQLite error during fetch_all: {e}")
+                    raise DatabaseError(f"Database error: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error during fetch_all: {query} with params {params}. Error: {e}")
+                    raise DatabaseError(f"Unexpected database error: {e}")
+            
+            raise DatabaseError("Database fetch operation failed after maximum retries")
     
     async def close(self) -> None:
         """Close database connection if open."""
@@ -175,3 +249,45 @@ class DatabaseManager:
             await self._connection.close()
             self._connection = None
             logger.info("Database connection closed")
+    
+    def _extract_table_name(self, query: str, operation_type: str) -> str:
+        """Extract table name from SQL query for monitoring purposes."""
+        try:
+            query_lower = query.lower().strip()
+            
+            if operation_type == "SELECT":
+                # Look for "FROM table_name"
+                if " from " in query_lower:
+                    parts = query_lower.split(" from ")[1].split()
+                    return parts[0] if parts else "unknown"
+            elif operation_type in ["INSERT", "REPLACE"]:
+                # Look for "INSERT INTO table_name" or "REPLACE INTO table_name"
+                if " into " in query_lower:
+                    parts = query_lower.split(" into ")[1].split()
+                    return parts[0] if parts else "unknown"
+            elif operation_type == "UPDATE":
+                # Look for "UPDATE table_name"
+                parts = query_lower.split()
+                if len(parts) > 1:
+                    return parts[1]
+            elif operation_type == "DELETE":
+                # Look for "DELETE FROM table_name"
+                if " from " in query_lower:
+                    parts = query_lower.split(" from ")[1].split()
+                    return parts[0] if parts else "unknown"
+            
+            return "unknown"
+        except Exception:
+            return "unknown"
+    
+    def _extract_guild_id(self, params: tuple) -> Optional[int]:
+        """Extract guild_id from query parameters for monitoring purposes."""
+        try:
+            # Guild ID is typically the first parameter in our queries
+            if params and len(params) > 0:
+                first_param = params[0]
+                if isinstance(first_param, int) and first_param > 0:
+                    return first_param
+            return None
+        except Exception:
+            return None

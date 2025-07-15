@@ -7,6 +7,7 @@ from typing import Union, List, Dict, Optional
 import discord
 from .manager import DatabaseManager, DatabaseError
 from .models import BlacklistedEmoji
+from .logging_manager import monitoring_manager
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -20,13 +21,16 @@ class GuildBlacklistManager:
         self.db_manager = db_manager
         self._cache: Dict[int, Dict[str, set]] = {}  # guild_id -> {unicode: set, custom: set}
     
-    async def add_emoji(self, guild_id: int, emoji: Union[str, discord.Emoji, discord.PartialEmoji]) -> bool:
+    async def add_emoji(self, guild_id: int, emoji: Union[str, discord.Emoji, discord.PartialEmoji], 
+                       user_id: Optional[int] = None, command_name: Optional[str] = None) -> bool:
         """
         Add an emoji to the guild's blacklist.
         
         Args:
             guild_id: Discord guild ID
             emoji: Emoji to add (Unicode string or Discord emoji object)
+            user_id: ID of user making the change (for audit logging)
+            command_name: Name of command that triggered the change (for audit logging)
             
         Returns:
             True if emoji was added, False if already exists
@@ -48,6 +52,21 @@ class GuildBlacklistManager:
             # Update cache
             self._update_cache_add(guild_id, emoji_type, emoji_value)
             
+            # Log blacklist change for audit trail
+            emoji_info = {
+                'emoji_type': emoji_type,
+                'emoji_value': emoji_value,
+                'emoji_name': emoji_name,
+                'display': self._get_emoji_display_string(emoji_type, emoji_value, emoji_name)
+            }
+            monitoring_manager.audit_logger.log_blacklist_change(
+                guild_id=guild_id,
+                action='ADD',
+                emoji_info=emoji_info,
+                user_id=user_id,
+                command_name=command_name
+            )
+            
             logger.info(f"Added {emoji_type} emoji {emoji_value} to blacklist for guild {guild_id}")
             return True
             
@@ -66,13 +85,16 @@ class GuildBlacklistManager:
             logger.error(f"Unexpected error adding emoji to blacklist for guild {guild_id}: {e}")
             raise
     
-    async def remove_emoji(self, guild_id: int, emoji: Union[str, discord.Emoji, discord.PartialEmoji, int]) -> bool:
+    async def remove_emoji(self, guild_id: int, emoji: Union[str, discord.Emoji, discord.PartialEmoji, int], 
+                          user_id: Optional[int] = None, command_name: Optional[str] = None) -> bool:
         """
         Remove an emoji from the guild's blacklist.
         
         Args:
             guild_id: Discord guild ID
             emoji: Emoji to remove (Unicode string, Discord emoji object, or custom emoji ID)
+            user_id: ID of user making the change (for audit logging)
+            command_name: Name of command that triggered the change (for audit logging)
             
         Returns:
             True if emoji was removed, False if not found
@@ -82,17 +104,19 @@ class GuildBlacklistManager:
             if isinstance(emoji, int):
                 emoji_type = "custom"
                 emoji_value = str(emoji)
+                emoji_name = "unknown"
                 
-                # Check if exists in database directly for integer IDs
+                # Get emoji name from database for audit logging
                 query = """
-                    SELECT COUNT(*) as count FROM guild_blacklists 
+                    SELECT emoji_name FROM guild_blacklists 
                     WHERE guild_id = ? AND emoji_type = ? AND emoji_value = ?
                 """
                 result = await self.db_manager.fetch_one(query, (guild_id, emoji_type, emoji_value))
-                if not result or result['count'] == 0:
+                if not result:
                     return False
+                emoji_name = result.get('emoji_name', 'unknown')
             else:
-                emoji_type, emoji_value, _ = self._parse_emoji(emoji)
+                emoji_type, emoji_value, emoji_name = self._parse_emoji(emoji)
                 
                 # Check if exists
                 if not await self.is_blacklisted(guild_id, emoji):
@@ -107,6 +131,21 @@ class GuildBlacklistManager:
             
             # Update cache
             self._update_cache_remove(guild_id, emoji_type, emoji_value)
+            
+            # Log blacklist change for audit trail
+            emoji_info = {
+                'emoji_type': emoji_type,
+                'emoji_value': emoji_value,
+                'emoji_name': emoji_name,
+                'display': self._get_emoji_display_string(emoji_type, emoji_value, emoji_name)
+            }
+            monitoring_manager.audit_logger.log_blacklist_change(
+                guild_id=guild_id,
+                action='REMOVE',
+                emoji_info=emoji_info,
+                user_id=user_id,
+                command_name=command_name
+            )
             
             logger.info(f"Removed {emoji_type} emoji {emoji_value} from blacklist for guild {guild_id}")
             return True
@@ -328,6 +367,15 @@ class GuildBlacklistManager:
                 self._cache[guild_id]["unicode"].discard(emoji_value)
             else:
                 self._cache[guild_id]["custom"].discard(emoji_value)
+    
+    def _get_emoji_display_string(self, emoji_type: str, emoji_value: str, emoji_name: Optional[str]) -> str:
+        """Get display string for an emoji based on its type and values."""
+        if emoji_type == "unicode":
+            return emoji_value
+        else:
+            # Custom emoji
+            name = emoji_name or 'unknown'
+            return f"<:{name}:{emoji_value}>"
     
     async def migrate_from_global_blacklist(self, guild_id: int, unicode_emojis: set, custom_emoji_ids: set, custom_emoji_names: dict) -> None:
         """

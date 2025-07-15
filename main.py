@@ -148,7 +148,11 @@ class Reacter(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
 
         # Initialize database managers
-        self.db_manager = DatabaseManager()
+        db_path = os.getenv('DATABASE_PATH', 'data/bot_data.db')
+        # Ensure data directory exists
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        
+        self.db_manager = DatabaseManager(db_path)
         self.guild_config_manager = GuildConfigManager(self.db_manager)
         self.guild_blacklist_manager = GuildBlacklistManager(self.db_manager)
         self.migration_manager = MigrationManager(self.db_manager, BLACKLIST_FILE)

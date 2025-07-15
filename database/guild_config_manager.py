@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from database.manager import DatabaseManager, DatabaseError
 from database.models import GuildConfig
+from database.logging_manager import monitoring_manager, ConfigurationChange
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,21 @@ class GuildConfigManager:
             
             # Cache the new config
             self._config_cache[guild_id] = config
+            
+            # Log configuration creation for audit trail
+            change = ConfigurationChange(
+                guild_id=guild_id,
+                change_type='CREATE',
+                field_name='default_config',
+                old_value=None,
+                new_value={
+                    'log_channel_id': None,
+                    'timeout_duration': 300,
+                    'dm_on_timeout': False
+                }
+            )
+            monitoring_manager.audit_logger.log_config_change(change)
+            
             logger.info(f"Created default configuration for guild {guild_id}")
             return config
             
@@ -129,12 +145,15 @@ class GuildConfigManager:
             self._config_cache[guild_id] = default_config
             return default_config
     
-    async def update_guild_config(self, guild_id: int, **kwargs) -> None:
+    async def update_guild_config(self, guild_id: int, user_id: Optional[int] = None, 
+                                 command_name: Optional[str] = None, **kwargs) -> None:
         """
         Update guild configuration with provided settings.
         
         Args:
             guild_id: Discord guild ID
+            user_id: ID of user making the change (for audit logging)
+            command_name: Name of command that triggered the change (for audit logging)
             **kwargs: Configuration fields to update (log_channel_id, timeout_duration, dm_on_timeout)
             
         Raises:
@@ -144,7 +163,7 @@ class GuildConfigManager:
         self._validate_config_update(kwargs)
         
         try:
-            # Get current config to ensure it exists
+            # Get current config to ensure it exists and for audit logging
             current_config = await self.get_guild_config(guild_id)
             
             # Build update query dynamically based on provided kwargs
@@ -172,6 +191,22 @@ class GuildConfigManager:
             """
             
             await self.db_manager.execute_query(query, tuple(params))
+            
+            # Log each configuration change for audit trail
+            for field, new_value in kwargs.items():
+                if field in ['log_channel_id', 'timeout_duration', 'dm_on_timeout']:
+                    old_value = getattr(current_config, field, None)
+                    if old_value != new_value:
+                        change = ConfigurationChange(
+                            guild_id=guild_id,
+                            change_type='UPDATE',
+                            field_name=field,
+                            old_value=old_value,
+                            new_value=new_value,
+                            user_id=user_id,
+                            command_name=command_name
+                        )
+                        monitoring_manager.audit_logger.log_config_change(change)
             
             # Update cache regardless of database success
             if guild_id in self._config_cache:
