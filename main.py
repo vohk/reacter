@@ -372,7 +372,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 # Admin commands
 @bot.command(name='blacklist')
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def blacklist_command(ctx: commands.Context):
     """Show current blacklisted emojis."""
     all_emojis = bot.emoji_blacklist.get_all_display()
@@ -412,7 +412,7 @@ async def blacklist_command(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 @bot.command(name='add_blacklist', aliases=['blacklist_add'])
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def add_blacklist(ctx: commands.Context, *, emoji_input: str):
     """Add an emoji to the blacklist. Supports Unicode and custom emojis."""
     # Try to parse as custom emoji
@@ -452,7 +452,7 @@ async def add_blacklist(ctx: commands.Context, *, emoji_input: str):
         await ctx.send(f"{emoji_display} is already blacklisted.")
 
 @bot.command(name='remove_blacklist', aliases=['blacklist_remove'])
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def remove_blacklist(ctx: commands.Context, *, emoji_input: str):
     """Remove an emoji from the blacklist."""
     # Try to parse as custom emoji
@@ -479,7 +479,7 @@ async def remove_blacklist(ctx: commands.Context, *, emoji_input: str):
             await ctx.send(f"❌ {parsed} is not blacklisted.")
 
 @bot.command(name='clear_blacklist')
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def clear_blacklist(ctx: commands.Context):
     """Clear all blacklisted emojis (requires confirmation)."""
     await ctx.send("⚠️ Are you sure you want to clear ALL blacklisted emojis? Type `yes` to confirm.")
@@ -519,7 +519,7 @@ async def timeout_info(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 @bot.command(name='debug_blacklist')
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def debug_blacklist(ctx):
     """Debug blacklist contents"""
     unicode_emojis = list(bot.emoji_blacklist.unicode_emojis)
@@ -545,7 +545,7 @@ async def debug_blacklist(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name='test_emoji_check')
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def test_emoji_check(ctx, *, emoji_input: str):
     """Test if a specific emoji is detected as blacklisted"""
     # Test both the input and when processed through Discord
@@ -556,7 +556,7 @@ async def test_emoji_check(ctx, *, emoji_input: str):
     await ctx.send(f"In unicode blacklist: {emoji_input in bot.emoji_blacklist.unicode_emojis}")
 
 @bot.command(name='test_reaction')
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def test_reaction(ctx):
     """Test if the bot can detect reactions"""
     msg = await ctx.send("React to this message with any emoji to test detection!")
@@ -571,7 +571,7 @@ async def test_reaction(ctx):
         await ctx.send("❌ No reaction detected within 30 seconds")
 
 @bot.command(name='bot_perms')
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(moderate_members=True)
 async def check_bot_permissions(ctx):
     """Check bot permissions"""
     bot_member = ctx.guild.me
