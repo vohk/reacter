@@ -11,6 +11,11 @@ import asyncio
 import re
 from dotenv import load_dotenv
 
+# Import database managers
+from database.manager import DatabaseManager
+from database.guild_config_manager import GuildConfigManager
+from database.guild_blacklist_manager import GuildBlacklistManager
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -141,9 +146,20 @@ class Reacter(commands.Bot):
 
         super().__init__(command_prefix='!', intents=intents)
 
+        # Initialize database managers
+        self.db_manager = DatabaseManager()
+        self.guild_config_manager = GuildConfigManager(self.db_manager)
+        self.guild_blacklist_manager = GuildBlacklistManager(self.db_manager)
+
+        # Legacy blacklist for backward compatibility during migration
         self.emoji_blacklist = EmojiBlacklist()
         self.timeout_cooldowns: Dict[int, Dict[int, datetime]] = defaultdict(dict)
         self.load_blacklist()
+
+    async def setup_hook(self):
+        """Initialize database when bot starts."""
+        await self.db_manager.initialize_database()
+        logger.info("Database initialized successfully")
 
     def load_blacklist(self) -> None:
         """Load blacklist from file or use defaults."""
@@ -221,6 +237,35 @@ def parse_emoji(emoji_str: str) -> Optional[Union[str, int]]:
     # Otherwise treat as Unicode emoji
     return emoji_str
 
+def get_emoji_display(emoji: Union[str, discord.Emoji, discord.PartialEmoji]) -> str:
+    """Get a display string for an emoji."""
+    if isinstance(emoji, str):
+        return emoji
+    elif hasattr(emoji, 'id') and emoji.id:
+        if hasattr(emoji, 'animated') and emoji.animated:
+            return f"<a:{emoji.name}:{emoji.id}>"
+        else:
+            return f"<:{emoji.name}:{emoji.id}>"
+    elif hasattr(emoji, 'name'):
+        return emoji.name
+    return str(emoji)
+
+async def log_guild_action(guild: discord.Guild, guild_config, message: str) -> None:
+    """Send a log message to the guild's designated log channel."""
+    if not guild_config.log_channel_id:
+        return
+
+    log_channel = guild.get_channel(guild_config.log_channel_id)
+    if log_channel and isinstance(log_channel, discord.TextChannel):
+        try:
+            await log_channel.send(message)
+        except discord.Forbidden:
+            logger.warning(f"Cannot send to log channel in {guild.name}")
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send log message: {e}")
+    else:
+        logger.warning(f"Log channel {guild_config.log_channel_id} not found or not accessible in {guild.name}")
+
 @bot.event
 async def on_ready():
     logger.info(f'Bot is ready. Logged in as {bot.user}')
@@ -232,12 +277,6 @@ async def on_ready():
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     logger.info(f"Reaction detected: {payload.emoji} by user {payload.user_id}")
-    logger.info(f"Payload emoji type: {type(payload.emoji)}")
-    logger.info(f"Payload emoji repr: {repr(payload.emoji)}")
-
-    # Debug the blacklist contents
-    logger.info(f"Unicode blacklist contents: {bot.emoji_blacklist.unicode_emojis}")
-    logger.info(f"Custom emoji blacklist contents: {bot.emoji_blacklist.custom_emoji_ids}")
 
     # Ignore bot reactions
     if payload.user_id == bot.user.id:
@@ -257,17 +296,21 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     logger.info(f"Processing reaction in guild: {guild.name}")
 
-    # Check if emoji is blacklisted
-    is_blacklisted = bot.emoji_blacklist.is_blacklisted(payload.emoji)
-    logger.info(f"Emoji {payload.emoji} blacklisted: {is_blacklisted}")
+    # Get guild configuration
+    try:
+        guild_config = await bot.guild_config_manager.get_guild_config(guild.id)
+    except Exception as e:
+        logger.error(f"Failed to get guild config for {guild.name}: {e}")
+        return
 
-    # Additional debug info
-    if isinstance(payload.emoji, str):
-        logger.info(f"Checking Unicode emoji: '{payload.emoji}' in {bot.emoji_blacklist.unicode_emojis}")
-    elif hasattr(payload.emoji, 'id') and payload.emoji.id:
-        logger.info(f"Checking custom emoji ID: {payload.emoji.id} in {bot.emoji_blacklist.custom_emoji_ids}")
-    elif hasattr(payload.emoji, 'name'):
-        logger.info(f"Checking PartialEmoji name: '{payload.emoji.name}' in {bot.emoji_blacklist.unicode_emojis}")
+    # Check if emoji is blacklisted using guild-specific blacklist
+    try:
+        is_blacklisted = await bot.guild_blacklist_manager.is_blacklisted(guild.id, payload.emoji)
+    except Exception as e:
+        logger.error(f"Failed to check blacklist for guild {guild.name}: {e}")
+        return
+
+    logger.info(f"Emoji {payload.emoji} blacklisted in guild {guild.name}: {is_blacklisted}")
 
     if not is_blacklisted:
         logger.info("Emoji not blacklisted, ignoring")
@@ -311,7 +354,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
 
     # Get emoji display string
-    emoji_display = bot.emoji_blacklist.get_emoji_display(payload.emoji)
+    emoji_display = get_emoji_display(payload.emoji)
 
     # Remove reaction
     try:
@@ -332,29 +375,30 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         logger.info(f"Skipping timeout for {member} (cooldown active)")
         return
 
-    # Apply timeout
+    # Apply timeout using guild-specific timeout duration
     try:
-        timeout_until = discord.utils.utcnow() + timedelta(seconds=TIMEOUT_DURATION)
+        timeout_duration = guild_config.timeout_duration
+        timeout_until = discord.utils.utcnow() + timedelta(seconds=timeout_duration)
         await member.timeout(timeout_until, reason=f"Used blacklisted reaction: {emoji_display}")
 
         # Update cooldown
         bot.timeout_cooldowns[guild.id][member.id] = datetime.now(timezone.utc)
 
-        # Log the action
+        # Log the action using guild-specific log channel
         log_message = (
             f"⚠️ **Timeout Applied**\n"
             f"**User:** {member.mention} ({member.name})\n"
             f"**Reaction:** {emoji_display}\n"
             f"**Channel:** {channel.mention}\n"
-            f"**Duration:** {TIMEOUT_DURATION} seconds"
+            f"**Duration:** {timeout_duration} seconds"
         )
-        await bot.log_action(guild, log_message)
+        await log_guild_action(guild, guild_config, log_message)
 
-        # Optional: DM the user
-        if DM_ON_TIMEOUT:
+        # Optional: DM the user using guild-specific setting
+        if guild_config.dm_on_timeout:
             try:
                 dm_message = (
-                    f"You have been timed out in **{guild.name}** for {TIMEOUT_DURATION} seconds "
+                    f"You have been timed out in **{guild.name}** for {timeout_duration} seconds "
                     f"for using the blacklisted reaction: {emoji_display}"
                 )
                 await member.send(dm_message)
@@ -363,7 +407,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             except discord.HTTPException:
                 pass
 
-        logger.info(f"Timed out {member} in {guild.name} for {TIMEOUT_DURATION}s")
+        logger.info(f"Timed out {member} in {guild.name} for {timeout_duration}s")
 
     except discord.Forbidden:
         logger.error(f"Cannot timeout {member} in {guild.name} (missing permissions)")
