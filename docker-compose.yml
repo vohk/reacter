@@ -3,7 +3,7 @@ version: '3.8'
 services:
   reacter:
     build: .
-    container_name: reacter-bot
+    container_name: reacter
     restart: unless-stopped
     environment:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}

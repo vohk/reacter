@@ -108,7 +108,7 @@ For production deployment, you can use Docker:
    
    # Run the container
    docker run -d \
-     --name reacter-bot \
+     --name reacter \
      --restart unless-stopped \
      -e DISCORD_BOT_TOKEN=your_bot_token_here \
      -v $(pwd)/data:/app/data \
@@ -120,7 +120,7 @@ For production deployment, you can use Docker:
    ```bash
    docker-compose logs -f reacter
    # or
-   docker logs -f reacter-bot
+   docker logs -f reacter
    ```
 
 The Docker setup includes:
